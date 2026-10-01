@@ -1,0 +1,96 @@
+name: AnyRouter Daily Check-in
+
+on:
+  workflow_dispatch:
+  schedule:
+    # UTC 02:15 = 北京时间 10:15；GitHub 定时任务可能延迟。
+    - cron: '15 2 * * *'
+
+permissions: {}
+
+concurrency:
+  group: anyrouter-daily-checkin
+  cancel-in-progress: false
+
+jobs:
+  check-in:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Check in with saved session
+        env:
+          ANYROUTER_COOKIE: ${{ secrets.ANYROUTER_COOKIE }}
+          ANYROUTER_USER_ID: ${{ secrets.ANYROUTER_USER_ID }}
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+          import urllib.error
+          import urllib.request
+
+          def fail(message):
+              print(message, file=sys.stderr)
+              raise SystemExit(1)
+
+          cookie = os.environ.get("ANYROUTER_COOKIE", "").strip()
+          user_id = os.environ.get("ANYROUTER_USER_ID", "").strip()
+          if not cookie or not user_id:
+              fail("缺少 ANYROUTER_COOKIE 或 ANYROUTER_USER_ID，请配置仓库 Secrets。")
+          if "\r" in cookie or "\n" in cookie:
+              fail("Cookie 必须是一行请求头值，不要包含换行。")
+          if not user_id.isascii() or not user_id.isdecimal() or int(user_id) <= 0:
+              fail("ANYROUTER_USER_ID 应填写 new-api-user 请求头中的正整数。")
+
+          class NoRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, req, fp, code, msg, headers, newurl):
+                  # 避免重定向时把凭证发送到其他地址。
+                  return None
+
+          request = urllib.request.Request(
+              "https://anyrouter.top/api/user/sign_in",
+              method="POST",
+              headers={
+                  "Accept": "application/json",
+                  "Accept-Encoding": "identity",
+                  "Cookie": cookie,
+                  "new-api-user": user_id,
+                  "Origin": "https://anyrouter.top",
+                  "Referer": "https://anyrouter.top/console",
+                  "User-Agent": "anyrouter-daily-checkin/1.0",
+              },
+          )
+          opener = urllib.request.build_opener(NoRedirect())
+          try:
+              with opener.open(request, timeout=30) as response:
+                  status = response.status
+                  content_type = response.headers.get_content_type()
+                  body = response.read(65537)
+          except urllib.error.HTTPError as error:
+              if 300 <= error.code < 400:
+                  fail("接口发生重定向，已停止；请在浏览器检查登录态及接口地址。")
+              if error.code in (401, 403):
+                  fail(f"HTTP {error.code}：可能是会话失效或安全验证拦截，请在浏览器检查。")
+              if error.code == 429:
+                  fail("HTTP 429：请求受限；本次不自动重试。")
+              fail(f"接口返回 HTTP {error.code}；本次不自动重试。")
+          except (urllib.error.URLError, TimeoutError, OSError):
+              fail("网络、TLS 或超时错误；请求可能已经到达服务器，本次不自动重试。")
+
+          if not 200 <= status < 300:
+              fail(f"接口返回非成功状态 HTTP {status}。")
+          if content_type != "application/json":
+              fail("接口没有返回 JSON，可能遇到登录页或安全验证；未输出响应正文。")
+          if len(body) > 65536:
+              fail("响应体异常过大；未输出响应正文。")
+          try:
+              result = json.loads(body)
+          except (ValueError, UnicodeError):
+              fail("响应不是有效 JSON；未输出响应正文。")
+          if not isinstance(result, dict) or result.get("success") is not True:
+              fail("接口未返回 success=true；请在浏览器检查签到状态和登录态。")
+
+          print("签到接口返回 success=true。")
+          print("接口未提供本次新增额度信息；请以网站余额或领取记录为准。")
+          PY
