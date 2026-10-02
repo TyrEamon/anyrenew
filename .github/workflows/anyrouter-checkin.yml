@@ -24,11 +24,14 @@ jobs:
         shell: bash
         run: |
           python3 - <<'PY'
+          import gzip
+          import io
           import json
           import os
           import sys
           import urllib.error
           import urllib.request
+          import zlib
 
           def fail(message):
               print(message, file=sys.stderr)
@@ -40,6 +43,9 @@ jobs:
               fail("缺少 ANYROUTER_COOKIE 或 ANYROUTER_USER_ID，请配置仓库 Secrets。")
           if "\r" in cookie or "\n" in cookie:
               fail("Cookie 必须是一行请求头值，不要包含换行。")
+          cookie_parts = dict(part.strip().split("=", 1) for part in cookie.split(";") if "=" in part)
+          if cookie.lower().startswith("cookie:") or not cookie_parts.get("session", "").strip():
+              fail("ANYROUTER_COOKIE 必须包含 session=会话值，不能只填裸值或带 Cookie: 前缀。")
           if not user_id.isascii() or not user_id.isdecimal() or int(user_id) <= 0:
               fail("ANYROUTER_USER_ID 应填写 new-api-user 请求头中的正整数。")
 
@@ -66,6 +72,7 @@ jobs:
               with opener.open(request, timeout=30) as response:
                   status = response.status
                   content_type = response.headers.get_content_type()
+                  content_encoding = response.headers.get("Content-Encoding", "identity").strip().lower()
                   body = response.read(65537)
           except urllib.error.HTTPError as error:
               if 300 <= error.code < 400:
@@ -80,13 +87,30 @@ jobs:
 
           if not 200 <= status < 300:
               fail(f"接口返回非成功状态 HTTP {status}。")
-          if content_type != "application/json":
-              fail("接口没有返回 JSON，可能遇到登录页或安全验证；未输出响应正文。")
+          known_types = {"application/json", "text/html", "text/plain", "application/octet-stream"}
+          display_type = content_type if content_type in known_types else "其他类型"
+          display_encoding = content_encoding if content_encoding in {"identity", "gzip", "br", "deflate"} else "其他编码"
+          print(f"响应诊断：HTTP {status}；Content-Type={display_type}；Content-Encoding={display_encoding}；接收 {len(body)} 字节。", flush=True)
           if len(body) > 65536:
               fail("响应体异常过大；未输出响应正文。")
+          if content_encoding == "gzip":
+              try:
+                  with gzip.GzipFile(fileobj=io.BytesIO(body)) as compressed:
+                      body = compressed.read(65537)
+              except (OSError, EOFError, zlib.error):
+                  fail("gzip 响应解压失败；未输出响应正文。")
+          elif content_encoding not in {"", "identity"}:
+              fail("服务器未遵守 identity 编码请求，返回了暂不支持的压缩格式；未输出响应正文。")
+          if len(body) > 65536:
+              fail("解压后的响应体异常过大；未输出响应正文。")
           try:
               result = json.loads(body)
           except (ValueError, UnicodeError):
+              prefix = body[:8192].decode("utf-8-sig", errors="replace").lstrip().lower()
+              if "<script" in prefix:
+                  fail("收到包含 JavaScript 的网页，而非领取接口 JSON；可能是站点安全验证或登录页面。完整 Cookie 也不保证能跨运行环境复用。")
+              if content_type == "text/html" or prefix.startswith("<"):
+                  fail("收到 HTML/XML 页面，而非领取接口 JSON；请在浏览器检查登录态及安全验证。未输出响应正文。")
               fail("响应不是有效 JSON；未输出响应正文。")
           if not isinstance(result, dict) or result.get("success") is not True:
               fail("接口未返回 success=true；请在浏览器检查签到状态和登录态。")

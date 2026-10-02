@@ -1,6 +1,7 @@
 """Offline checks for the Python embedded in the GitHub Actions workflow."""
 
 import contextlib
+import gzip
 import io
 import json
 import os
@@ -24,7 +25,7 @@ class WorkflowTests(unittest.TestCase):
         cls.code = compile(textwrap.dedent(script), str(path), "exec")
 
     def execute(self, body=b'{"message":"","success":true}', content_type="application/json",
-                status=200, error=None, env=None):
+                status=200, error=None, env=None, content_encoding=None):
         environment = {"ANYROUTER_COOKIE": self.COOKIE, "ANYROUTER_USER_ID": "123"}
         if env is not None:
             environment.update(env)
@@ -32,6 +33,8 @@ class WorkflowTests(unittest.TestCase):
         response.status = status
         response.headers = Message()
         response.headers["Content-Type"] = content_type
+        if content_encoding is not None:
+            response.headers["Content-Encoding"] = content_encoding
         response.read.side_effect = lambda size: body[:size]
         response.__enter__.return_value = response
         opener = MagicMock()
@@ -75,6 +78,54 @@ class WorkflowTests(unittest.TestCase):
                 code, _, _, _ = self.execute(body=body)
                 self.assertEqual(code, 0 if success else 1)
 
+    def test_json_with_nonstandard_content_type(self):
+        for content_type in ("text/plain", "text/html", "application/problem+json", self.PRIVATE_MESSAGE):
+            with self.subTest(content_type=content_type):
+                code, _, _, _ = self.execute(content_type=content_type)
+                self.assertEqual(code, 0)
+
+    def test_gzip_json_succeeds(self):
+        body = gzip.compress(b'{"message":"","success":true}')
+        code, logs, _, _ = self.execute(body=body, content_encoding="gzip")
+        self.assertEqual(code, 0)
+        self.assertIn("Content-Encoding=gzip", logs)
+
+    def test_html_and_script_diagnostics(self):
+        cases = [
+            (b'<html><body>login</body></html>', "HTML/XML"),
+            (f'<script>{self.PRIVATE_MESSAGE}</script>'.encode(), "JavaScript"),
+        ]
+        for raw, diagnostic in cases:
+            for encoding in ("identity", "gzip"):
+                with self.subTest(diagnostic=diagnostic, encoding=encoding):
+                    body = gzip.compress(raw) if encoding == "gzip" else raw
+                    code, logs, _, _ = self.execute(
+                        body=body, content_type="text/html", content_encoding=encoding)
+                    self.assertEqual(code, 1)
+                    self.assertIn("Content-Type=text/html", logs)
+                    self.assertIn(diagnostic, logs)
+                    self.assertNotIn(raw.decode(), logs)
+
+    def test_invalid_or_oversized_compression_fails(self):
+        cases = [
+            {"body": b'not gzip', "content_encoding": "gzip"},
+            {"body": gzip.compress(b' ' * 65537), "content_encoding": "gzip"},
+            {"content_encoding": "br"},
+            {"content_encoding": self.PRIVATE_MESSAGE},
+        ]
+        for index, case in enumerate(cases):
+            with self.subTest(case=index):
+                code, _, _, _ = self.execute(**case)
+                self.assertEqual(code, 1)
+
+    def test_complete_cookie_succeeds_without_logging_values(self):
+        cookie = self.COOKIE + "; acw_tc=TEST_ONLY_TRAFFIC_COOKIE; acw_sc__v2=TEST_ONLY_SECURITY_COOKIE"
+        code, logs, opener, _ = self.execute(env={"ANYROUTER_COOKIE": cookie})
+        self.assertEqual(code, 0)
+        self.assertEqual(opener.open.call_args.args[0].get_header("Cookie"), cookie)
+        self.assertNotIn("TEST_ONLY_TRAFFIC_COOKIE", logs)
+        self.assertNotIn("TEST_ONLY_SECURITY_COOKIE", logs)
+
     def test_bad_responses_fail(self):
         cases = [
             {"body": b'{"success":false}'},
@@ -114,6 +165,11 @@ class WorkflowTests(unittest.TestCase):
     def test_invalid_secrets_never_send_requests(self):
         cases = [
             {"ANYROUTER_COOKIE": ""},
+            {"ANYROUTER_COOKIE": "RAW_SESSION_VALUE="},
+            {"ANYROUTER_COOKIE": "session="},
+            {"ANYROUTER_COOKIE": "acw_tc=TEST_ONLY"},
+            {"ANYROUTER_COOKIE": "Cookie: " + self.COOKIE},
+            {"ANYROUTER_COOKIE": "Cookie: acw_tc=TEST_ONLY; " + self.COOKIE},
             {"ANYROUTER_COOKIE": "session=one\nother=two"},
             {"ANYROUTER_USER_ID": ""},
             {"ANYROUTER_USER_ID": "0"},
