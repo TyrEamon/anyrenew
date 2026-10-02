@@ -17,8 +17,6 @@ jobs:
   check-in:
     runs-on: ubuntu-latest
     timeout-minutes: 12
-    env:
-      PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/anyrenew-browsers
     steps:
       - name: Check out workflow code
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -29,6 +27,8 @@ jobs:
         run: python3 -B -m unittest discover -s tests -v
 
       - name: Install browser only on the temporary runner
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/anyrenew-browsers
         shell: bash
         run: |
           python3 -m venv "$RUNNER_TEMP/anyrenew-venv"
@@ -37,6 +37,7 @@ jobs:
 
       - name: Check in with an isolated browser
         env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/anyrenew-browsers
           ANYROUTER_COOKIE: ${{ secrets.ANYROUTER_COOKIE }}
           ANYROUTER_USER_ID: ${{ secrets.ANYROUTER_USER_ID }}
         shell: bash

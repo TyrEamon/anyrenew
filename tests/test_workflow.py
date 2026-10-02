@@ -256,6 +256,17 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(checkin.main(self.env), 1)
         self.assertIn("未输出", self.output.getvalue())
 
+    def test_runner_context_is_only_used_inside_steps(self):
+        workflow = (ROOT / ".github/workflows/anyrouter-checkin.yml").read_text(encoding="utf-8")
+        job_configuration, steps = workflow.split("    steps:\n", 1)
+        self.assertNotIn("${{ runner.", job_configuration)
+        browser_path = "          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/anyrenew-browsers"
+        self.assertEqual(steps.count(browser_path), 2)
+        install, execution = steps.split("      - name: Check in with an isolated browser\n", 1)
+        self.assertIn(browser_path, install)
+        self.assertIn(browser_path, execution)
+        self.assertNotIn("secrets.ANYROUTER_COOKIE", install)
+
     def test_browser_javascript_with_node_builtins(self):
         node = shutil.which("node")
         if not node:
